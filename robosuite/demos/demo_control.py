@@ -138,9 +138,11 @@ if __name__ == "__main__":
     # Keep track of done variable to know when to break loop
     count = 0
     # Loop through controller space
-    while count < num_test_steps:
+    while count < 1:
         action = neutral.copy()
+        print(f'count : {count}')
         for i in range(steps_per_action):
+            print(f'i a: {i}')
             if controller_name in {"IK_POSE", "OSC_POSE"} and count > 2:
                 # Set this value to be the scaled axis angle vector
                 vec = np.zeros(3)
@@ -148,11 +150,18 @@ if __name__ == "__main__":
                 action[3:6] = vec
             else:
                 action[count] = test_value
+            print(f"action : {action}")
             total_action = np.tile(action, n)
-            env.step(total_action)
+            print(f"tot action : {total_action}")
+            obs, reward, done, _ = env.step(total_action)
+            print(f"obs : {obs}")
+            print(f"rew : {reward}")
+            print(f"done : {done}")
             env.render()
         for i in range(steps_per_rest):
+            # print(f'i r: {i}')
             total_action = np.tile(neutral, n)
+            # print(f"tot action : {total_action}")
             env.step(total_action)
             env.render()
         count += 1
