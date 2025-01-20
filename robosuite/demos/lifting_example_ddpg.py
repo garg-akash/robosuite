@@ -2,12 +2,12 @@ import os, sys, random
 from pathlib import Path
 from itertools import count
 import numpy as np
-# import gymnasium as gym
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.distributions import Normal
+from torch.utils.tensorboard import SummaryWriter
 import random
 from collections import deque
 
@@ -16,22 +16,24 @@ from robosuite import load_controller_config
 from robosuite.wrappers import GymWrapper
 
 from utils.common_utils import load_config, set_logging
+from datetime import datetime
+import time
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = "cpu"
 env_name = "Lift"
 robot_name = "UR5e"
 controller_name = "OSC_POSE"
-script_name = os.path.basename(__file__)
-directory = './exp' + script_name + env_name +'/'
 # update_iteration = 200
 mode = "test"
 to_load = mode == "test"
-epoch_to_load = 40
-num_epochs = 180
-num_episodes = 75
-episode_horizon = 150
-n_fc1 = 500
-n_fc2 = 500
+epoch_to_load = 0
+num_epochs = 150
+steps_per_epoch = 10000
+max_ep_len = 150
+update_after = 500
+n_fc1 = 300
+n_fc2 = 300
 test_epochs = 10
 render_training = False
 render_interval = 10
@@ -42,13 +44,36 @@ lr_critic = 0.001
 eps = 1.5 # for noise
 eps_decay = 0.0000015 # eps / episode_horizon
 batch_size = 64
-buffer_max_size = 50000
+buffer_max_size = 1000000
 
-# current_path = Path(os.getcwd()).resolve()
 current_path = os.path.dirname(os.path.abspath(__file__))
-logging_path = current_path + '/utils/default_logger.conf'
-saving_path = current_path + '/weights'
-os.makedirs(saving_path, exist_ok=True)
+logger_path = current_path + '/utils/default_logger.conf'
+
+if mode == "test":
+    timestamp = input("enter the timestamp to load : ")
+    epoch_to_load = input("enter the epoch to load : ")
+elif mode == "train":
+    timestamp = str(datetime.now().strftime("%d-%m-%Y_%H-%M-%S"))
+
+log_dir = os.path.join(
+    current_path,
+    "runs",
+    "DDPG",
+    f"{env_name}_{robot_name}_{controller_name}_{num_epochs}_{n_fc1}_{n_fc2}_{timestamp}"
+).replace("\\", "/")
+
+if mode == "test" and not os.path.exists(log_dir):
+    raise FileNotFoundError(f"Error: The directory '{log_dir}' does not exist. Please check the timestamp and try again.")
+else:
+    print(f"Log directory : {log_dir}")
+
+os.makedirs(log_dir, exist_ok=True)
+log_dir_weights = os.path.join(log_dir,'weights')
+os.makedirs(log_dir_weights, exist_ok=True)
+log_dir_tb = os.path.join(log_dir,'tensorboard')
+os.makedirs(log_dir_tb, exist_ok=True)
+writer = SummaryWriter(log_dir_tb)
+logging_txt_path = os.path.join(log_dir,'console.txt')  # Specify the dynamic log file path
 
 def fanin_init(size, fanin=None):
     fanin = fanin or size[0]
@@ -58,8 +83,6 @@ def fanin_init(size, fanin=None):
 class Actor(nn.Module):
     def __init__(self, state_dim, action_dim, action_high, n1, n2, init_w=3e-3):
         super(Actor, self).__init__()
-        # self.n1 = 300
-        # self.n2 = 300
         self.fc1 = nn.Linear(state_dim, n1)
         self.bn1 = nn.LayerNorm(n1)
         self.fc2 = nn.Linear(n1, n2)
@@ -81,8 +104,6 @@ class Actor(nn.Module):
 class Critic(nn.Module):
     def __init__(self, state_dim, action_dim, n1, n2, init_w=3e-3):
         super(Critic, self).__init__()
-        # self.n1 = 400
-        # self.n2 = 300
         self.fc1 = nn.Linear(state_dim + action_dim, n1)
         self.bn1 = nn.LayerNorm(n1)
         self.fc2 = nn.Linear(n1, n2)
@@ -129,9 +150,6 @@ class ReplayBuffer:
             d.append(np.array(D, copy=False))
 
         return np.array(x), np.array(y), np.array(u), np.array(r).reshape(-1, 1), np.array(d).reshape(-1, 1)
-
-    # def size(self):
-    #     return len(self.buffer)
     
 class DDPGAgent:
     def __init__(self, state_dim, action_dim, action_low, action_high, n1, n2, 
@@ -140,9 +158,6 @@ class DDPGAgent:
         self.critic = Critic(state_dim, action_dim, n1, n2).to(device)
         self.target_actor = Actor(state_dim, action_dim, action_high, n1, n2).to(device)
         self.target_critic = Critic(state_dim, action_dim, n1, n2).to(device)
-
-        # if to_load:
-        #     self.load(epoch_to_load)
 
         self.actor_optim = optim.Adam(self.actor.parameters(), lr=lr_actor)
         self.critic_optim = optim.Adam(self.critic.parameters(), lr=lr_critic)
@@ -173,10 +188,10 @@ class DDPGAgent:
         else:
             for target_param, para in zip(self.target_actor.parameters(), self.actor.parameters()):
                 target_param.data.copy_(target_param.data * (1 - self.tau) + para.data * self.tau)
-                # target_param.data.copy_(para.data)
+                
             for target_param, para in zip(self.target_critic.parameters(), self.critic.parameters()):
                 target_param.data.copy_(target_param.data * (1 - self.tau) + para.data * self.tau)
-                # target_param.data.copy_(para.data)
+                
 
     def select_action(self, state, epoch=1, total_epochs=1, noise=0.15, min_noise = 0.01, is_training=True):
         noise_scale = max(noise * (1 - epoch / total_epochs), min_noise)
@@ -188,7 +203,6 @@ class DDPGAgent:
         return action
     
     def train(self):
-        # for it in range(update_iteration): # TO CHECK
         states, next_states, actions, rewards, dones = self.replay_buffer.sample(self.batch_size)
 
         states = torch.FloatTensor(states).to(device)
@@ -208,21 +222,30 @@ class DDPGAgent:
         critic_loss.backward()
         self.critic_optim.step()
 
+        # freeze Q-network during policy learning step
+        for p in self.critic.parameters():
+            p.requires_grad = False
+
         actor_loss = -self.critic(states, self.actor(states)).mean()
         self.actor_optim.zero_grad()
         actor_loss.backward()
         self.actor_optim.step()
 
+        # unfreeze Q-network to enable it's optimization for the next DDPG step
+        for p in self.critic.parameters():
+            p.requires_grad = True
+
         self.update_target_networks(is_hard=False)
         
         self.num_actor_update_iteration += 1
         self.num_critic_update_iteration += 1
+        return critic_loss.item(), actor_loss.item()
 
     def save(self, dir, epoch):
-        torch.save(self.actor.state_dict(), dir + "/actor_{}.pt".format(epoch+1))
-        torch.save(self.critic.state_dict(), dir + "/critic_{}.pt".format(epoch+1))
-        torch.save(self.target_actor.state_dict(), dir + "/target_actor_{}.pt".format(epoch+1))
-        torch.save(self.target_critic.state_dict(), dir + "/target_critic_{}.pt".format(epoch+1))
+        torch.save(self.actor.state_dict(), dir + "/actor_{}.pt".format(epoch))
+        torch.save(self.critic.state_dict(), dir + "/critic_{}.pt".format(epoch))
+        torch.save(self.target_actor.state_dict(), dir + "/target_actor_{}.pt".format(epoch))
+        torch.save(self.target_critic.state_dict(), dir + "/target_critic_{}.pt".format(epoch))
 
     def load(self, dir, epoch):
         self.actor.load_state_dict(torch.load(dir + "/actor_{}.pt".format(epoch)))
@@ -255,52 +278,163 @@ if __name__ == "__main__":
     agent = DDPGAgent(env.observation_space.shape[0], env.action_space.shape[0],
                       env.action_space.low[0], env.action_space.high[0], n_fc1, n_fc2,
                       lr_actor, lr_critic, to_load, epoch_to_load, buffer_max_size, gamma, tau, eps, eps_decay, batch_size)
-    print("sap",env.action_space)
-    a = torch.prod(torch.Tensor(env.action_space.shape))
-    print("a",a)
+
     if mode == "train":
         # Set logging
-        log = set_logging(logging_path)
-        log.info("Environment: {} \n Robot: {}\n Controller {}\n".format(env_name, robot_name, controller_name))
+        log = set_logging(logger_path,logging_txt_path)
+        log.info("Environment: {} \n Robot: {}\n Controller {}\n DDPG\n".format(env_name, robot_name, controller_name))
+        log.info("num_epochs: {} \n num_episodes: {}\n episode_horizon {}\n".format(num_epochs, steps_per_epoch, max_ep_len))
+        log.info("n_fc1: {} \n n_fc2: {}\n".format(n_fc1, n_fc2))
+        log.info("lr_actor: {} \n lr_critic: {}\n".format(lr_actor, lr_critic))
         log.info("Training started...")
-        # agent.load()
-        total_step = 0
-        for epoch in range(num_epochs):
-            epoch_reward = 0
-            for episode in range(num_episodes):
-                obs = env.reset()
-                state = obs[0]
-                episode_reward = 0
-                done = False
-                step = 0
-                while (done == False) & (step <= episode_horizon):
-                    action = agent.select_action(state, epoch=epoch, total_epochs=num_epochs)
-                    next_state, reward, terminated, truncated, _ = env.step(action)
-                    done = terminated or truncated
-                    if render_training and episode % render_interval == 0:
-                        env.render()
-                    agent.replay_buffer.add((state, next_state, action, reward, np.float(done)))
+        header = f"{'Epoch':<5}\t{'Reward-avg':<10}\t{'Reward-min':<10}\t{'Reward-max':<10}\t{'Eps len-avg':<15}\t{'Critic loss-avg':<15}\t{'Actor loss-avg':<15}\t{'Time taken':<10}"
+        log.info(header)
+        total_steps = steps_per_epoch * num_epochs
+        epoch = 0
+        start_time = time.time()
+        obs, ep_ret, ep_len = env.reset(), 0, 0
+        ep_ret_list = []
+        ep_len_list = []
+        epoch_reward = 0
+        ep_critic_loss_sum = 0
+        ep_actor_loss_sum = 0
+        ep_critic_loss_list = []
+        ep_actor_loss_list = []
+        state = obs[0]
+        for t in range(total_steps):
+            action = agent.select_action(state, epoch=epoch, total_epochs=num_epochs)
+            next_state, reward, terminated, truncated, _ = env.step(action)
+            ep_ret += reward
+            ep_len += 1
+            done = False if ep_len == max_ep_len else (terminated or truncated)
+            agent.replay_buffer.add((state, next_state, action, reward, np.float(done)))
+            state = next_state    
+            
+            if done or (ep_len == max_ep_len):
+                # TODO : log ret and len
+                epoch_reward += ep_ret
+                ep_ret_list.append(ep_ret)
+                ep_len_list.append(ep_len)
 
-                    state = next_state    
-                    agent.train()
+                ep_critic_loss_avg = ep_critic_loss_sum / ep_len
+                ep_actor_loss_avg = ep_actor_loss_sum / ep_len
 
-                    step += 1
-                    episode_reward += reward
-                epoch_reward += episode_reward
-                total_step += step+1
-                # log.info("Episode:{} Steps:\t{}  Total Reward:\t{:0.2f}".format(episode, step, episode_reward))
-            log.info("Epoch:{} Epoch Reward:\t{:0.2f}".format(epoch, epoch_reward/num_episodes))
-            agent.save(dir=saving_path, epoch=epoch)
+                ep_critic_loss_list.append(ep_critic_loss_avg)
+                ep_actor_loss_list.append(ep_actor_loss_avg)
+
+                obs, ep_ret, ep_len = env.reset(), 0, 0
+                ep_critic_loss_sum = 0
+                ep_actor_loss_sum = 0
+
+            if render_training and t % render_interval == 0:
+                env.render()
+
+            if t >= update_after:
+                critic_loss, actor_loss = agent.train()
+                ep_critic_loss_sum += critic_loss
+                ep_actor_loss_sum += actor_loss
+
+                writer.add_scalar('Loss/Critic', critic_loss, t)
+                writer.add_scalar('Loss/Actor', actor_loss, t)
+
+            # End of epoch handling
+            if (t+1) % steps_per_epoch == 0:
+                epoch = (t+1) // steps_per_epoch
+                ep_ret_avg = sum(ep_ret_list) / len(ep_ret_list)
+                ep_ret_min = min(ep_ret_list)
+                ep_ret_max = max(ep_ret_list)
+
+                ep_len_min = min(ep_len_list)
+                ep_len_max = max(ep_len_list)
+                ep_len_avg = sum(ep_len_list) / len(ep_len_list)
+
+                critic_loss_avg = sum(ep_critic_loss_list) / len(ep_critic_loss_list)
+                actor_loss_avg = sum(ep_actor_loss_list) / len(ep_actor_loss_list)
+
+                time_taken = time.time() - start_time # this is the time taken by the epoch
+
+                writer.add_scalar('Reward/Epoch', epoch_reward/steps_per_epoch, epoch)
+                
+                log_message = f"{epoch:<5}\t{ep_ret_avg:<10.4f}\t{ep_ret_min:<10.4f}\t{ep_ret_max:<10.4f}\t{ep_len_avg:<15}\t{critic_loss_avg:<15.4f}\t{actor_loss_avg:<15.4f}\t{time_taken:<10.4f}"
+                log.info(log_message)
+
+                # reset
+                epoch_reward = 0
+                ep_ret_list = []
+                ep_len_list = []
+
+                ep_critic_loss_list = []
+                ep_actor_loss_list = []
+
+                start_time = time.time()
+
+                # if (epoch % save_freq == 0) or (epoch == num_epochs):
+                # writer.add_scalar('Loss/Critic', critic_loss, total_step)
+                # writer.add_scalar('Loss/Actor', actor_loss, total_step)
+                agent.save(dir=log_dir_weights, epoch=epoch)
+
+        # total_step = 0
+        # for epoch in range(num_epochs):
+        #     epoch_reward = 0
+        #     for episode in range(num_episodes):
+        #         obs = env.reset()
+        #         state = obs[0]
+        #         episode_reward = 0
+        #         done = False
+        #         step = 0
+        #         while (done == False) & (step <= episode_horizon):
+        #             action = agent.select_action(state, epoch=epoch, total_epochs=num_epochs)
+        #             next_state, reward, terminated, truncated, _ = env.step(action)
+        #             done = terminated or truncated
+        #             if render_training and episode % render_interval == 0:
+        #                 env.render()
+        #             agent.replay_buffer.add((state, next_state, action, reward, np.float(done)))
+
+        #             state = next_state    
+        #             critic_loss, actor_loss = agent.train()
+                    
+        #             # writer.add_scalar(f'Loss/Critic_Epoch{epoch}_Episode{episode}', critic_loss, total_step)
+        #             # writer.add_scalar(f'Loss/Actor_Epoch{epoch}_Episode{episode}', actor_loss, total_step)
+        #             writer.add_scalar('Loss/Critic', critic_loss, total_step)
+        #             writer.add_scalar('Loss/Actor', actor_loss, total_step)
+
+        #             step += 1
+        #             total_step += 1
+        #             episode_reward += reward
+        #         epoch_reward += episode_reward
+        #         # total_step += step+1
+        #         # log.info("Episode:{} Steps:\t{}  Total Reward:\t{:0.2f}".format(episode, step, episode_reward))
+        #     writer.add_scalar('Reward/Epoch', epoch_reward/num_episodes, epoch)
+        #     log.info("Epoch:{} Epoch Reward:\t{:0.2f}".format(epoch, epoch_reward/num_episodes))
+        #     agent.save(dir=log_dir_weights, epoch=epoch)
+        # writer.add_hparams(
+        # {
+        #     "num_epochs": num_epochs,
+        #     "num_episodes": num_episodes,
+        #     "episode_horizon": episode_horizon,
+        #     "n_fc1": n_fc1,
+        #     "n_fc2": n_fc2,
+        #     "lr_actor": lr_actor,
+        #     "lr_critic": lr_critic,
+        #     "eps": eps,
+        #     "eps_decay": eps_decay,
+        #     "batch_size": batch_size,
+        #     "buffer_max_size": buffer_max_size,
+        #     "tau": tau,
+        #     "gamma": gamma,
+        # },
+        # {}
+        # )
     
     elif mode == "test":
-        agent.load(dir=saving_path, epoch=epoch_to_load)
+        agent.load(dir=log_dir_weights, epoch=epoch_to_load)
         for i in range(test_epochs):
             obs = env.reset()
             state = obs[0]
             done = False
             step = 0
             ep_r = 0
-            while (done == False) & (step <= episode_horizon):
+            while (done == False) & (step <= max_ep_len):
                 action = agent.select_action(state, is_training=False)
                 state, reward, terminated, truncated, _ = env.step(action)
                 done = terminated or truncated
