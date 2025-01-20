@@ -372,59 +372,6 @@ if __name__ == "__main__":
                 # writer.add_scalar('Loss/Critic', critic_loss, total_step)
                 # writer.add_scalar('Loss/Actor', actor_loss, total_step)
                 agent.save(dir=log_dir_weights, epoch=epoch)
-
-        # total_step = 0
-        # for epoch in range(num_epochs):
-        #     epoch_reward = 0
-        #     for episode in range(num_episodes):
-        #         obs = env.reset()
-        #         state = obs[0]
-        #         episode_reward = 0
-        #         done = False
-        #         step = 0
-        #         while (done == False) & (step <= episode_horizon):
-        #             action = agent.select_action(state, epoch=epoch, total_epochs=num_epochs)
-        #             next_state, reward, terminated, truncated, _ = env.step(action)
-        #             done = terminated or truncated
-        #             if render_training and episode % render_interval == 0:
-        #                 env.render()
-        #             agent.replay_buffer.add((state, next_state, action, reward, np.float(done)))
-
-        #             state = next_state    
-        #             critic_loss, actor_loss = agent.train()
-                    
-        #             # writer.add_scalar(f'Loss/Critic_Epoch{epoch}_Episode{episode}', critic_loss, total_step)
-        #             # writer.add_scalar(f'Loss/Actor_Epoch{epoch}_Episode{episode}', actor_loss, total_step)
-        #             writer.add_scalar('Loss/Critic', critic_loss, total_step)
-        #             writer.add_scalar('Loss/Actor', actor_loss, total_step)
-
-        #             step += 1
-        #             total_step += 1
-        #             episode_reward += reward
-        #         epoch_reward += episode_reward
-        #         # total_step += step+1
-        #         # log.info("Episode:{} Steps:\t{}  Total Reward:\t{:0.2f}".format(episode, step, episode_reward))
-        #     writer.add_scalar('Reward/Epoch', epoch_reward/num_episodes, epoch)
-        #     log.info("Epoch:{} Epoch Reward:\t{:0.2f}".format(epoch, epoch_reward/num_episodes))
-        #     agent.save(dir=log_dir_weights, epoch=epoch)
-        # writer.add_hparams(
-        # {
-        #     "num_epochs": num_epochs,
-        #     "num_episodes": num_episodes,
-        #     "episode_horizon": episode_horizon,
-        #     "n_fc1": n_fc1,
-        #     "n_fc2": n_fc2,
-        #     "lr_actor": lr_actor,
-        #     "lr_critic": lr_critic,
-        #     "eps": eps,
-        #     "eps_decay": eps_decay,
-        #     "batch_size": batch_size,
-        #     "buffer_max_size": buffer_max_size,
-        #     "tau": tau,
-        #     "gamma": gamma,
-        # },
-        # {}
-        # )
     
     elif mode == "test":
         agent.load(dir=log_dir_weights, epoch=epoch_to_load)
