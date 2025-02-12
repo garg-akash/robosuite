@@ -19,8 +19,8 @@ from utils.common_utils import load_config, set_logging
 from datetime import datetime
 import time
 
-# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-device = "cpu"
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# device = "cpu"
 env_name = "Lift"
 robot_name = "UR5e"
 controller_name = "OSC_POSE"
@@ -31,7 +31,8 @@ epoch_to_load = 0
 num_epochs = 150
 steps_per_epoch = 10000
 max_ep_len = 150
-update_after = 500
+update_after = 2500
+update_every = 100
 n_fc1 = 300
 n_fc2 = 300
 test_epochs = 10
@@ -39,12 +40,14 @@ render_training = False
 render_interval = 10
 tau = 0.005
 gamma = 0.99
-lr_actor = 0.001
+lr_actor = 0.0001
 lr_critic = 0.001
 eps = 1.5 # for noise
 eps_decay = 0.0000015 # eps / episode_horizon
 batch_size = 64
 buffer_max_size = 1000000
+start_steps = 25000
+num_test_episodes = 10
 
 current_path = os.path.dirname(os.path.abspath(__file__))
 logger_path = current_path + '/utils/default_logger.conf'
@@ -79,6 +82,21 @@ def fanin_init(size, fanin=None):
     fanin = fanin or size[0]
     v = 1. / np.sqrt(fanin)
     return torch.Tensor(size).uniform_(-v, v)
+
+def test_agent(test_env, agent):
+    total_reward = 0
+    for j in range(num_test_episodes):
+        obs, done, ep_ret, ep_len = test_env.reset(), False, 0, 0
+        state = obs[0]
+        while not(done or ep_len == max_ep_len):
+            action = agent.select_action(state, is_training=False)
+            state, reward, terminated, truncated, _ = test_env.step(action)
+            ep_ret += reward
+            ep_len += 1
+            done = terminated or truncated
+        total_reward += ep_ret / ep_len
+    return total_reward / num_test_episodes
+        
 
 class Actor(nn.Module):
     def __init__(self, state_dim, action_dim, action_high, n1, n2, init_w=3e-3):
@@ -152,12 +170,18 @@ class ReplayBuffer:
         return np.array(x), np.array(y), np.array(u), np.array(r).reshape(-1, 1), np.array(d).reshape(-1, 1)
     
 class DDPGAgent:
-    def __init__(self, state_dim, action_dim, action_low, action_high, n1, n2, 
+    def __init__(self, state_dim, action_space, n1, n2, 
                  lr_actor, lr_critic, to_load, epoch_to_load, buffer_max_size, gamma, tau, eps, eps_decay, batch_size):
-        self.actor = Actor(state_dim, action_dim, action_high, n1, n2).to(device)
-        self.critic = Critic(state_dim, action_dim, n1, n2).to(device)
-        self.target_actor = Actor(state_dim, action_dim, action_high, n1, n2).to(device)
-        self.target_critic = Critic(state_dim, action_dim, n1, n2).to(device)
+                
+        self.action_space = action_space
+        self.action_dim = action_space.shape[0]
+        self.action_low = action_space.low[0]
+        self.action_high = action_space.high[0]
+        
+        self.actor = Actor(state_dim, self.action_dim, self.action_high, n1, n2).to(device)
+        self.critic = Critic(state_dim, self.action_dim, n1, n2).to(device)
+        self.target_actor = Actor(state_dim, self.action_dim, self.action_high, n1, n2).to(device)
+        self.target_critic = Critic(state_dim, self.action_dim, n1, n2).to(device)
 
         self.actor_optim = optim.Adam(self.actor.parameters(), lr=lr_actor)
         self.critic_optim = optim.Adam(self.critic.parameters(), lr=lr_critic)
@@ -172,9 +196,6 @@ class DDPGAgent:
         self.eps_decay = eps_decay
         self.batch_size = batch_size
 
-        self.action_dim = action_dim
-        self.action_low = action_low
-        self.action_high = action_high
         self.num_critic_update_iteration = 0
         self.num_actor_update_iteration = 0
         self.update_target_networks()
@@ -241,6 +262,15 @@ class DDPGAgent:
         self.num_critic_update_iteration += 1
         return critic_loss.item(), actor_loss.item()
 
+    def count_vars_module(self, module):
+        print("count")
+        for x in module.parameters():
+            print(x.shape, np.prod(x.shape))
+        return sum([np.prod(x.shape) for x in module.parameters()])
+
+    def count_vars(self):
+        return [self.count_vars_module(self.actor), self.count_vars_module(self.critic)]
+
     def save(self, dir, epoch):
         torch.save(self.actor.state_dict(), dir + "/actor_{}.pt".format(epoch))
         torch.save(self.critic.state_dict(), dir + "/critic_{}.pt".format(epoch))
@@ -275,10 +305,27 @@ if __name__ == "__main__":
         ),
         keys=["robot0_proprio-state","object-state"]
     )
-    agent = DDPGAgent(env.observation_space.shape[0], env.action_space.shape[0],
-                      env.action_space.low[0], env.action_space.high[0], n_fc1, n_fc2,
-                      lr_actor, lr_critic, to_load, epoch_to_load, buffer_max_size, gamma, tau, eps, eps_decay, batch_size)
 
+    test_env = GymWrapper(
+        suite.make(
+            env_name,
+            robots=robot_name,
+            controller_configs=controller_config,
+            reward_shaping=True,
+            reward_scale=1.0,
+            has_renderer=True,  # make sure we can render to the screen
+            has_offscreen_renderer=False,  # not needed since not using pixel obs
+            use_camera_obs=False,  # do not use pixel observations
+            # control_freq=50,  # control should happen fast enough so that simulation looks smoother
+            camera_names="frontview",
+        ),
+        keys=["robot0_proprio-state","object-state"]
+    )
+
+    state_dims = env.observation_space.shape[0]
+    agent = DDPGAgent(state_dims, env.action_space, n_fc1, n_fc2,
+                      lr_actor, lr_critic, to_load, epoch_to_load, buffer_max_size, gamma, tau, eps, eps_decay, batch_size)
+    print("sample : ", env.action_space.sample())
     if mode == "train":
         # Set logging
         log = set_logging(logger_path,logging_txt_path)
@@ -286,8 +333,11 @@ if __name__ == "__main__":
         log.info("num_epochs: {} \n num_episodes: {}\n episode_horizon {}\n".format(num_epochs, steps_per_epoch, max_ep_len))
         log.info("n_fc1: {} \n n_fc2: {}\n".format(n_fc1, n_fc2))
         log.info("lr_actor: {} \n lr_critic: {}\n".format(lr_actor, lr_critic))
+        params = agent.count_vars()
+        log.info("Dimensitons: State {}\tAction {}".format(state_dims, env.action_space.shape[0]))
+        log.info("Number of parameters: actor {}\tcritic {}\ttotal {}".format(params[0], params[1], sum(params)))
         log.info("Training started...")
-        header = f"{'Epoch':<5}\t{'Reward-avg':<10}\t{'Reward-min':<10}\t{'Reward-max':<10}\t{'Eps len-avg':<15}\t{'Critic loss-avg':<15}\t{'Actor loss-avg':<15}\t{'Time taken':<10}"
+        header = f"{'Epoch':<5}\t{'Reward-avg':<10}\t{'Reward-min':<10}\t{'Reward-max':<10}\t{'Eps len-avg':<15}\t{'Critic loss-avg':<15}\t{'Actor loss-avg':<15}\t{'Test-reward':<10}\t{'Time taken':<10}"
         log.info(header)
         total_steps = steps_per_epoch * num_epochs
         epoch = 0
@@ -301,8 +351,13 @@ if __name__ == "__main__":
         ep_critic_loss_list = []
         ep_actor_loss_list = []
         state = obs[0]
+
         for t in range(total_steps):
-            action = agent.select_action(state, epoch=epoch, total_epochs=num_epochs)
+            if t > start_steps:
+                action = agent.select_action(state, epoch=epoch, total_epochs=num_epochs)
+            else:
+                action = env.action_space.sample()
+            
             next_state, reward, terminated, truncated, _ = env.step(action)
             ep_ret += reward
             ep_len += 1
@@ -310,13 +365,13 @@ if __name__ == "__main__":
             agent.replay_buffer.add((state, next_state, action, reward, np.float(done)))
             state = next_state    
             
+            # End of episode / trajectory handling
             if done or (ep_len == max_ep_len):
-                # TODO : log ret and len
-                epoch_reward += ep_ret
+                epoch_reward += ep_ret # TODO : verify if this is equal to sum of list 
                 ep_ret_list.append(ep_ret)
                 ep_len_list.append(ep_len)
 
-                ep_critic_loss_avg = ep_critic_loss_sum / ep_len
+                ep_critic_loss_avg = ep_critic_loss_sum / ep_len # TODO : should it be ep_len?
                 ep_actor_loss_avg = ep_actor_loss_sum / ep_len
 
                 ep_critic_loss_list.append(ep_critic_loss_avg)
@@ -328,14 +383,27 @@ if __name__ == "__main__":
 
             if render_training and t % render_interval == 0:
                 env.render()
+            
+            # Update handling
+            if t >= update_after and t % update_every == 0:
+                updated_critic_loss_sum = 0
+                updated_actor_loss_sum = 0
+                counter = 0
+                for _ in range(update_every):
+                    counter += 1
+                    critic_loss, actor_loss = agent.train()
+                    updated_critic_loss_sum += critic_loss
+                    updated_actor_loss_sum += actor_loss
+                
+                if counter >= update_every:
+                    updated_critic_loss_avg = updated_critic_loss_sum / counter 
+                    updated_actor_loss_avg = updated_actor_loss_sum / counter 
 
-            if t >= update_after:
-                critic_loss, actor_loss = agent.train()
-                ep_critic_loss_sum += critic_loss
-                ep_actor_loss_sum += actor_loss
+                    ep_critic_loss_sum += updated_critic_loss_avg
+                    ep_actor_loss_sum += updated_actor_loss_avg
 
-                writer.add_scalar('Loss/Critic', critic_loss, t)
-                writer.add_scalar('Loss/Actor', actor_loss, t)
+                    writer.add_scalar('Loss/Critic', updated_critic_loss_avg, t)
+                    writer.add_scalar('Loss/Actor', updated_actor_loss_avg, t)
 
             # End of epoch handling
             if (t+1) % steps_per_epoch == 0:
@@ -350,12 +418,14 @@ if __name__ == "__main__":
 
                 critic_loss_avg = sum(ep_critic_loss_list) / len(ep_critic_loss_list)
                 actor_loss_avg = sum(ep_actor_loss_list) / len(ep_actor_loss_list)
+                
+                test_reward = test_agent(test_env,agent)
 
                 time_taken = time.time() - start_time # this is the time taken by the epoch
 
                 writer.add_scalar('Reward/Epoch', epoch_reward/steps_per_epoch, epoch)
                 
-                log_message = f"{epoch:<5}\t{ep_ret_avg:<10.4f}\t{ep_ret_min:<10.4f}\t{ep_ret_max:<10.4f}\t{ep_len_avg:<15}\t{critic_loss_avg:<15.4f}\t{actor_loss_avg:<15.4f}\t{time_taken:<10.4f}"
+                log_message = f"{epoch:<5}\t{ep_ret_avg:<10.4f}\t{ep_ret_min:<10.4f}\t{ep_ret_max:<10.4f}\t{ep_len_avg:<15}\t{critic_loss_avg:<15.4f}\t{actor_loss_avg:<15.4f}\t{test_reward:<10.4f}\t{time_taken:<10.4f}"
                 log.info(log_message)
 
                 # reset
