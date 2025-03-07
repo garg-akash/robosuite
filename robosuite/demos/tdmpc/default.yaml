@@ -19,7 +19,7 @@ iterations: 6
 num_samples : 256
 num_elites: 64
 mixture_coef: 0.05
-min_std: 0.05
+min_std: 0.15
 temperature: 0.5
 momentum: 0.1
 
@@ -32,14 +32,16 @@ value_coef: 0.1
 consistency_coef: 2
 rho: 0.5
 kappa: 0.1
+q_lr: 1e-4
 lr: 3e-4
-std_schedule: linear(0.5, ${min_std}, 15000)
-horizon_schedule: linear(1, ${horizon}, 15000)
+std_schedule: linear(0.5, ${min_std}, 50000)
+# horizon_schedule: linear(1, ${horizon}, 15000)
 per_alpha: 0.6
 per_beta: 0.4
 grad_clip_norm: 10
 seed_steps: 1500
 update_freq: 2
+q_tau: 0.001
 tau: 0.01
 
 # architecture

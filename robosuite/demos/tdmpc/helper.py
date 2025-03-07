@@ -30,6 +30,11 @@ def ema(m, m_target, tau):
     with torch.no_grad():
         for p, p_target in zip(m.parameters(), m_target.parameters()):
             p_target.data.lerp_(p.data, tau) # Linear interpolation in place
+        
+def emaInd(p_params, p_target_params, tau):
+    with torch.no_grad():
+        for p, p_target in zip(p_params, p_target_params):
+            p_target.data.lerp_(p.data, tau) # Linear interpolation in place
 
 def set_requires_gradient(net, value):
     for p in net.parameters():

@@ -48,8 +48,23 @@ class TDMPC:
         self.std = h.linear_schedule(cfg.std_schedule, 0)
         self.model = TOLD(cfg).cuda()
         self.model_target = deepcopy(self.model)
-        self.optim = torch.optim.Adam(self.model.parameters(), lr=self.cfg.lr)
+        # self.optim = torch.optim.Adam(self.model.parameters(), lr=self.cfg.lr)
         self.pi_optim = torch.optim.Adam(self.model._pi.parameters(), lr=self.cfg.lr)
+        self.q_params = list(self.model._Q1.parameters()) + list(self.model._Q2.parameters())
+        self.q_target_params = list(self.model_target._Q1.parameters()) + list(self.model_target._Q2.parameters())
+        self.other_params = []
+        for name, param in self.model.named_parameters():
+            if '_Q1' not in name and '_Q2' not in name:
+                self.other_params.append(param)
+        self.other_target_params = []
+        for name, param in self.model_target.named_parameters():
+            if '_Q1' not in name and '_Q2' not in name:
+                self.other_target_params.append(param)
+        optim_params = [
+            {'params' : self.q_params, 'lr' : self.cfg.q_lr},
+            {'params' : self.other_params, 'lr' : self.cfg.lr}
+        ]
+        self.optim = torch.optim.Adam(optim_params)
         # self.aug = h.RandomShiftsAug(cfg) TODO
         self.model.eval()
         self.model_target.eval()
@@ -84,10 +99,11 @@ class TDMPC:
             return torch.empty(self.cfg.action_dim, dtype=torch.float32, device=self.device).uniform_(-1, 1)
         obs = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
         # print("obs : ", obs.shape)
-        if step is not None:
-            horizon = int(min(self.cfg.horizon, h.linear_schedule(self.cfg.horizon_schedule, step)))
-        else:
-            horizon = self.cfg.horizon
+        # if step is not None:
+        #     horizon = int(min(self.cfg.horizon, h.linear_schedule(self.cfg.horizon_schedule, step)))
+        # else:
+        #     horizon = self.cfg.horizon
+        horizon = self.cfg.horizon
         # print(f"step {step} horizon {horizon}")
         
         num_pi_trajs = int(self.cfg.mixture_coef * self.cfg.num_samples)
@@ -210,7 +226,9 @@ class TDMPC:
         
         pi_loss = self.update_pi(zs)
         if step % self.cfg.update_freq == 0:
-            h.ema(self.model, self.model_target, self.cfg.tau)
+            h.emaInd(self.q_params, self.q_target_params, self.cfg.q_tau)
+            h.emaInd(self.other_params, self.other_target_params, self.cfg.tau)
+            # h.ema(self.model, self.model_target, self.cfg.tau)
 
         self.model.eval()
         return {'consistency_loss': float(consistency_loss.mean().item()),
